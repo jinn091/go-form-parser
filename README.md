@@ -9,9 +9,9 @@
 - ✅ Parses HTML form data into Go structs
 - ✅ Supports both `application/x-www-form-urlencoded` and `multipart/form-data`
 - ✅ Validates input using [`validator`](https://github.com/go-playground/validator)
-- ✅ Automatically hashes uploaded files using SHA-256
 - ✅ Rejects unsupported MIME types (JPEG, PNG, PDF by default)
 - ✅ Limits file uploads by size (default: 5MB)
+- ✅ Collects uploaded file content so you can save them manually (in memory)
 
 ---
 
@@ -31,17 +31,18 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
 
-	"github.com/your-username/formparser"
+	"github.com/jinn091/formparser"
 	"github.com/go-playground/form/v4"
 	"github.com/go-playground/validator/v10"
 )
 
 type RegistrationForm struct {
-	Name            string `form:"name" validate:"required,min=2"`
-	Email           string `form:"email" validate:"required,email"`
-	Age             int    `form:"age" validate:"gte=18,lte=100"`
-	ProfilePicture  string `form:"profile_picture"`
+	Name           string `form:"name" validate:"required,min=2"`
+	Email          string `form:"email" validate:"required,email"`
+	Age            int    `form:"age" validate:"gte=18,lte=100"`
+	ProfilePicture string `form:"profile_picture"`
 }
 
 func main() {
@@ -56,6 +57,14 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Optional: save uploaded file manually
+		if file := cfg.Files["profile_picture"]; file != nil {
+			_ = os.Mkdir("uploads", 0755)
+			_ = os.WriteFile("uploads/"+file.Filename, file.Content, 0644)
+			fmt.Println("Saved file to uploads/" + file.Filename)
+		}
+
 		fmt.Fprintf(w, "Form submitted successfully: %+v", form)
 	})
 
@@ -81,11 +90,12 @@ curl -X POST http://localhost:8080/register   -F "name=Bob"   -F "email=bob@exam
 
 ## 🔐 File Validation
 
-| Check         | Description                       |
-|---------------|-----------------------------------|
-| MIME Type     | Only JPEG, PNG, and PDF accepted  |
-| Max File Size | 5 MB (`5 << 20`)                  |
-| Output        | File SHA-256 hash as string       |
+| Check         | Description                        |
+|---------------|------------------------------------|
+| MIME Type     | Only JPEG, PNG, and PDF accepted   |
+| Max File Size | 5 MB (`5 << 20`)                   |
+| Output        | SHA-256 hash in the struct field   |
+| Manual Save   | Use `cfg.Files["field_name"]`      |
 
 ---
 
