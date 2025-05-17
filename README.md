@@ -1,13 +1,13 @@
 # 🧾 formparser
 
-`formparser` is a lightweight Go library that helps you parse and validate form data from HTTP requests — including support for both `application/x-www-form-urlencoded` and `multipart/form-data` with file validation (type and size).
+`formparser` is a lightweight Go library that helps you parse and validate form data from HTTP requests — including support for `application/json`, `application/x-www-form-urlencoded`, and `multipart/form-data` with file validation (type and size).
 
 ---
 
 ## ✨ Features
 
-- ✅ Parses HTML form data into Go structs
-- ✅ Supports both `application/x-www-form-urlencoded` and `multipart/form-data`
+- ✅ Parses HTML and JSON form data into Go structs
+- ✅ Supports `application/json`, `application/x-www-form-urlencoded`, and `multipart/form-data`
 - ✅ Validates input using [`validator`](https://github.com/go-playground/validator)
 - ✅ Rejects unsupported MIME types (JPEG, PNG, PDF by default)
 - ✅ Limits file uploads by size (default: 5MB)
@@ -39,9 +39,9 @@ import (
 )
 
 type RegistrationForm struct {
-	Name           string `form:"name" validate:"required,min=2"`
-	Email          string `form:"email" validate:"required,email"`
-	Age            int    `form:"age" validate:"gte=18,lte=100"`
+	Name           string `form:"name" json:"name" validate:"required,min=2"`
+	Email          string `form:"email" json:"email" validate:"required,email"`
+	Age            int    `form:"age" json:"age" validate:"gte=18,lte=100"`
 	ProfilePicture string `form:"profile_picture"`
 }
 
@@ -76,14 +76,27 @@ func main() {
 
 ## 🧪 CURL Testing
 
-### Submit a normal form:
+### Submit a JSON body:
 ```bash
-curl -X POST http://localhost:8080/register   -H "Content-Type: application/x-www-form-urlencoded"   -d "name=Alice&email=alice@example.com&age=25"
+curl -X POST http://localhost:8080/register \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice", "email": "alice@example.com", "age": 25}'
+```
+
+### Submit a URL-encoded form:
+```bash
+curl -X POST http://localhost:8080/register \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "name=Alice&email=alice@example.com&age=25"
 ```
 
 ### Submit with file upload:
 ```bash
-curl -X POST http://localhost:8080/register   -F "name=Bob"   -F "email=bob@example.com"   -F "age=30"   -F "profile_picture=@./your_image.jpg"
+curl -X POST http://localhost:8080/register \
+  -F "name=Bob" \
+  -F "email=bob@example.com" \
+  -F "age=30" \
+  -F "profile_picture=@./your_image.jpg"
 ```
 
 ---
@@ -96,17 +109,6 @@ curl -X POST http://localhost:8080/register   -F "name=Bob"   -F "email=bob@exam
 | Max File Size | 5 MB (`5 << 20`)                   |
 | Output        | SHA-256 hash in the struct field   |
 | Manual Save   | Use `cfg.Files["field_name"]`      |
-
----
-
-## 📁 Folder Structure
-
-```
-formparser/
-  └── formparser.go
-go.mod
-README.md
-```
 
 ---
 
