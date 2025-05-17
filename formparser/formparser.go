@@ -3,6 +3,7 @@ package formparser
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,28 +15,15 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-// Config holds shared dependencies such as a form decoder and a validator instance.
+// Config holds shared dependencies and config options for the parser.
 type Config struct {
-	Decoder   *form.Decoder
-	Validator *validator.Validate
+	Decoder            *form.Decoder
+	Validator          *validator.Validate
+	FieldErrorMessages map[string]string // Optional: field-specific validation messages
 }
 
 // ────────────────────────────────────────────────────────────────
 // 📌 Main entry point for parsing and validating forms
-//
-// Detects the request's Content-Type and chooses appropriate handler.
-//
-// 🧪 Example curl for x-www-form-urlencoded:
-//
-//	curl -X POST http://localhost:8080/register \
-//	  -H "Content-Type: application/x-www-form-urlencoded" \
-//	  -d "name=Ko Nyi&email=ko@example.com&age=25"
-//
-// 🧪 Example curl for multipart/form-data with file:
-//
-//	curl -X POST http://localhost:8080/register \
-//	  -F "name=Ko Nyi" -F "email=ko@example.com" -F "age=25" \
-//	  -F "profile_picture=@path/to/image.jpg"
 func (cfg *Config) ParseFormBasedOnContentType(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	contentType := r.Header.Get("Content-Type")
 	switch {
@@ -51,14 +39,6 @@ func (cfg *Config) ParseFormBasedOnContentType(w http.ResponseWriter, r *http.Re
 
 // ────────────────────────────────────────────────────────────────
 // 🔤 Handles application/x-www-form-urlencoded data
-//
-// Simple parsing of URL-encoded form data (like HTML forms without files).
-//
-// Example curl:
-//
-//	curl -X POST http://localhost:8080/register \
-//	  -H "Content-Type: application/x-www-form-urlencoded" \
-//	  -d "name=Alice&email=alice@example.com&age=22"
 func (cfg *Config) parseURLEncoded(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Can't parse form", http.StatusBadRequest)
@@ -70,15 +50,6 @@ func (cfg *Config) parseURLEncoded(w http.ResponseWriter, r *http.Request, dst i
 
 // ────────────────────────────────────────────────────────────────
 // 📎 Handles multipart/form-data with file validation
-//
-// Parses form fields and files, supports max file size and type checking.
-// Accepted types: JPEG, PNG, PDF; Max file size: 5MB
-//
-// Example curl:
-//
-//	curl -X POST http://localhost:8080/register \
-//	  -F "name=John" -F "email=john@example.com" -F "age=30" \
-//	  -F "profile_picture=@path/to/file.jpg"
 func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -95,21 +66,18 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 		defer part.Close()
 
 		if part.FileName() == "" {
-			// Handle normal field
 			buf := new(bytes.Buffer)
 			_, _ = buf.ReadFrom(part)
 			values.Add(part.FormName(), buf.String())
 			continue
 		}
 
-		// File: validate type
 		contentType := part.Header.Get("Content-Type")
 		if !isAllowedContentType(contentType) {
 			http.Error(w, "Unsupported file type", http.StatusBadRequest)
 			return fmt.Errorf("unsupported file type: %s", contentType)
 		}
 
-		// File: validate size (max 5MB)
 		const maxFileSize = 5 << 20 // 5MB
 		var fileBuf bytes.Buffer
 		n, err := io.CopyN(&fileBuf, part, maxFileSize+1)
@@ -122,7 +90,6 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 			return fmt.Errorf("file too large: %d bytes", n)
 		}
 
-		// File: SHA-256 hash
 		hash := sha256.Sum256(fileBuf.Bytes())
 		values.Add(part.FormName(), fmt.Sprintf("%x", hash))
 	}
@@ -133,11 +100,29 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 
 // ────────────────────────────────────────────────────────────────
 // ✅ Validates parsed struct fields using validator instance
-//
-// Called after form data has been decoded into the destination struct.
 func (cfg *Config) validateAndRespond(w http.ResponseWriter, dst interface{}) error {
 	if err := cfg.Validator.Struct(dst); err != nil {
-		http.Error(w, "Validation failed: "+err.Error(), http.StatusBadRequest)
+		if validationErrs, ok := err.(validator.ValidationErrors); ok {
+			fieldErrors := make(map[string]string)
+			for _, ve := range validationErrs {
+				field := strings.ToLower(ve.Field())
+				if msg, exists := cfg.FieldErrorMessages[field]; exists {
+					fieldErrors[field] = msg
+				} else {
+					fieldErrors[field] = fmt.Sprintf("%s is %s", field, ve.Tag())
+				}
+			}
+			// Respond with JSON error
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":   "Validation failed",
+				"details": fieldErrors,
+			})
+			return err
+		}
+
+		http.Error(w, "Validation failed", http.StatusBadRequest)
 		return err
 	}
 	return nil
@@ -145,9 +130,6 @@ func (cfg *Config) validateAndRespond(w http.ResponseWriter, dst interface{}) er
 
 // ────────────────────────────────────────────────────────────────
 // 📁 File type whitelist
-//
-// List of accepted MIME types for uploaded files.
-// Extendable based on needs.
 func isAllowedContentType(contentType string) bool {
 	allowed := []string{"image/jpeg", "image/png", "application/pdf"}
 	for _, a := range allowed {
