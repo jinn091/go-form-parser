@@ -16,32 +16,24 @@ import (
 )
 
 // UploadedFile holds metadata and content of a parsed uploaded file.
-// You can access uploaded files from `Config.Files["fieldname"]`.
 type UploadedFile struct {
-	Filename    string // original filename (e.g. "photo.jpg")
-	ContentType string // MIME type (e.g. "image/jpeg")
-	Content     []byte // file data as bytes
-	Hash        string // SHA-256 checksum of file content
+	Filename    string
+	ContentType string
+	Content     []byte
+	Hash        string
 }
 
 // Config defines the shared parser config and context.
-// Pass it to your handler once and reuse it across requests.
 type Config struct {
-	Decoder            *form.Decoder            // required: form decoder
-	Validator          *validator.Validate      // required: struct validator
-	FieldErrorMessages map[string]string        // optional: map[json|form field]custom message
-	Files              map[string]*UploadedFile // output: populated if multipart files are parsed
+	Decoder            *form.Decoder
+	Validator          *validator.Validate
+	FieldErrorMessages map[string]string
+	Files              map[string]*UploadedFile
+	AllowedMIMETypes   []string // Optional: user-defined MIME type whitelist
+	MaxFileSize        int64    // Optional: max size per file in bytes (default 5MB)
 }
 
-// ParseFormBasedOnContentType detects the Content-Type and routes parsing accordingly.
-// Supports: multipart/form-data, application/x-www-form-urlencoded, application/json
-//
-// Params:
-//   - w: http.ResponseWriter — for sending errors
-//   - r: *http.Request — the incoming HTTP request
-//   - dst: interface{} — a pointer to a struct to decode the parsed form/JSON data into
-//
-// Returns: error if any parsing or validation fails
+// ParseFormBasedOnContentType routes to JSON, URL-encoded, or multipart parser.
 func (cfg *Config) ParseFormBasedOnContentType(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	contentType := r.Header.Get("Content-Type")
 	switch {
@@ -57,8 +49,7 @@ func (cfg *Config) ParseFormBasedOnContentType(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// parseJSON decodes JSON request body into a struct and validates it.
-// Use this for `Content-Type: application/json`
+// parseJSON handles JSON payload.
 func (cfg *Config) parseJSON(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
@@ -67,8 +58,7 @@ func (cfg *Config) parseJSON(w http.ResponseWriter, r *http.Request, dst interfa
 	return cfg.validateAndRespond(w, dst)
 }
 
-// parseURLEncoded handles `application/x-www-form-urlencoded` payloads.
-// Populates the dst struct and validates it.
+// parseURLEncoded handles application/x-www-form-urlencoded data.
 func (cfg *Config) parseURLEncoded(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Can't parse form", http.StatusBadRequest)
@@ -78,8 +68,7 @@ func (cfg *Config) parseURLEncoded(w http.ResponseWriter, r *http.Request, dst i
 	return cfg.validateAndRespond(w, dst)
 }
 
-// parseMultipart handles `multipart/form-data` requests and stores uploaded file data in memory.
-// Populates `Config.Files` with file metadata and inserts file hashes into `dst` struct if matching field exists.
+// parseMultipart handles multipart/form-data and stores uploaded files.
 func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -89,6 +78,10 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 
 	values := make(url.Values)
 	cfg.Files = make(map[string]*UploadedFile)
+
+	if cfg.MaxFileSize == 0 {
+		cfg.MaxFileSize = 5 << 20 // default 5MB
+	}
 
 	for {
 		part, err := mr.NextPart()
@@ -100,29 +93,25 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 		formName := part.FormName()
 
 		if part.FileName() == "" {
-			// regular field
 			buf := new(bytes.Buffer)
 			_, _ = buf.ReadFrom(part)
 			values.Add(formName, buf.String())
 			continue
 		}
 
-		// validate file content type
 		contentType := part.Header.Get("Content-Type")
-		if !isAllowedContentType(contentType) {
+		if !cfg.isAllowedContentType(contentType) {
 			http.Error(w, "Unsupported file type", http.StatusBadRequest)
 			return fmt.Errorf("unsupported file type: %s", contentType)
 		}
 
-		// enforce max file size (5MB)
-		const maxFileSize = 5 << 20
 		var fileBuf bytes.Buffer
-		n, err := io.CopyN(&fileBuf, part, maxFileSize+1)
+		n, err := io.CopyN(&fileBuf, part, cfg.MaxFileSize+1)
 		if err != nil && err != io.EOF {
 			http.Error(w, "Error reading file", http.StatusInternalServerError)
 			return err
 		}
-		if n > maxFileSize {
+		if n > cfg.MaxFileSize {
 			http.Error(w, "File too large", http.StatusRequestEntityTooLarge)
 			return fmt.Errorf("file too large: %d bytes", n)
 		}
@@ -130,7 +119,6 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 		content := fileBuf.Bytes()
 		hash := sha256.Sum256(content)
 
-		// store file metadata
 		cfg.Files[formName] = &UploadedFile{
 			Filename:    part.FileName(),
 			ContentType: contentType,
@@ -138,7 +126,6 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 			Hash:        fmt.Sprintf("%x", hash),
 		}
 
-		// insert hash as string field into struct
 		values.Add(formName, fmt.Sprintf("%x", hash))
 	}
 
@@ -146,8 +133,7 @@ func (cfg *Config) parseMultipart(w http.ResponseWriter, r *http.Request, dst in
 	return cfg.validateAndRespond(w, dst)
 }
 
-// validateAndRespond uses go-playground/validator to validate the decoded struct.
-// If validation fails, it sends a structured JSON error with all field issues.
+// validateAndRespond validates the dst struct and returns JSON error if failed.
 func (cfg *Config) validateAndRespond(w http.ResponseWriter, dst interface{}) error {
 	if err := cfg.Validator.Struct(dst); err != nil {
 		if validationErrs, ok := err.(validator.ValidationErrors); ok {
@@ -174,12 +160,14 @@ func (cfg *Config) validateAndRespond(w http.ResponseWriter, dst interface{}) er
 	return nil
 }
 
-// isAllowedContentType restricts accepted uploaded file MIME types.
-// You can extend this list to support more types.
-func isAllowedContentType(contentType string) bool {
-	allowed := []string{"image/jpeg", "image/png", "application/pdf"}
-	for _, a := range allowed {
-		if contentType == a {
+// isAllowedContentType checks against user-defined or default MIME types.
+func (cfg *Config) isAllowedContentType(contentType string) bool {
+	// No allowed MIME types = no files allowed
+	if len(cfg.AllowedMIMETypes) == 0 {
+		return false
+	}
+	for _, allowed := range cfg.AllowedMIMETypes {
+		if contentType == allowed {
 			return true
 		}
 	}
