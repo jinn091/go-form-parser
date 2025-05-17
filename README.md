@@ -19,7 +19,7 @@
 ## 📦 Installation
 
 ```bash
-go get github.com/jinn091/formparser
+go get github.com/jinn091/go-form-parser
 ```
 
 ---
